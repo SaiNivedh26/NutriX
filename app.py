@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import io
 import dotenv
-from dotenv import load_dotenv()
+from dotenv import load_dotenv
 import os
 load_dotenv()
 # Configure Gemini API (Note: Replace with a secure method of API key management)
