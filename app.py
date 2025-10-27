@@ -6,9 +6,12 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 import io
-
+import dotenv
+from dotenv import load_dotenv()
+import os
+load_dotenv()
 # Configure Gemini API (Note: Replace with a secure method of API key management)
-gemini.configure(api_key="AIzaSyDAA7gq4wlgmKaivg_NsD3uF3CkIn8B8mc")
+gemini.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 
 # Custom loading phrases
 LOADING_PHRASES = [
@@ -20,7 +23,7 @@ LOADING_PHRASES = [
 ]
 
 def get_gem_response(input_prompt, image):
-    model = gemini.GenerativeModel('gemini-1.5-flash')
+    model = gemini.GenerativeModel('gemini-2.5-flash')
     response = model.generate_content([input_prompt, image[0]])
     return response.text
 
@@ -233,7 +236,7 @@ def display_footer():
             color: #27AE60; 
             font-weight: bold;
         ">
-            Designed and Developed by Sai Nikedh from 9-B
+            Designed and Developed by Sai Nikedh from 10-B
         </p>
         <p style="
             font-size: 1.1em; 
