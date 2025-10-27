@@ -3,3 +3,4 @@ pillow
 streamlit
 matplotlib
 numpy
+python-dotenv
