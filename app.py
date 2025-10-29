@@ -66,7 +66,7 @@ def main():
         page_icon="⭕", 
         layout="wide"
     )
-    st.markdown("<h1 style='font-size: 2em; color: red;'>Sai Nikedh - 9B</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='font-size: 2em; color: red;'>Sai Nikedh - 10 B</h1>", unsafe_allow_html=True)
 
     # Load and resize the QR code image
     qr_code_image = Image.open('image.png')  # Path to uploaded image
