@@ -133,63 +133,110 @@ analyzeBtn.addEventListener('click', async () => {
         
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
+        let buffer = ''; // Buffer for incomplete SSE messages
         
         while (true) {
             const { done, value } = await reader.read();
-            if (done) break;
-            
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n');
-            
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    try {
-                        const data = JSON.parse(line.slice(6));
-                        
-                        if (data.type === 'chunk') {
-                            fullResponse += data.chunk;
-                            // Highlight numbers in the full response and update display
-                            const highlightedResponse = highlightNumbers(fullResponse);
-                            nutritionText.innerHTML = highlightedResponse;
-                            // Store for sharing
-                            currentNutritionText = highlightedResponse;
-                            // Auto-scroll to bottom
-                            nutritionText.scrollTop = nutritionText.scrollHeight;
-                            // Update progress
-                            progressFill.style.width = `${Math.min(90, (fullResponse.length / 1000) * 90)}%`;
-                        } else if (data.type === 'complete') {
-                            macros = data.macros;
-                            imageBase64 = data.image;
-                            progressFill.style.width = '100%';
-                            
-                            // Update image preview
-                            if (imageBase64) {
-                                imagePreview.innerHTML = `<img src="${imageBase64}" alt="Analyzed Meal">`;
-                            }
-                            
-                            // Store macros for sharing
-                            currentMacros = macros;
-                            
-                            // Create chart after ensuring results section is visible
-                            // Use requestAnimationFrame to ensure DOM is ready
-                            requestAnimationFrame(() => {
-                                setTimeout(() => {
-                                    if (macros && macros.carbs !== undefined && macros.proteins !== undefined && macros.fats !== undefined) {
-                                        console.log('Creating chart with macros:', macros);
-                                        createMacroChart(macros);
-                                    } else {
-                                        console.error('Invalid macros data:', macros);
-                                        // Create chart with defaults if macros are invalid
-                                        createMacroChart({ carbs: 40, proteins: 30, fats: 30 });
-                                        currentMacros = { carbs: 40, proteins: 30, fats: 30 };
+            if (done) {
+                // Process any remaining data in buffer
+                if (buffer.trim()) {
+                    const messages = buffer.split('\n\n');
+                    for (const msg of messages) {
+                        if (msg.trim() && msg.startsWith('data: ')) {
+                            try {
+                                const jsonStr = msg.slice(6).trim();
+                                if (jsonStr) {
+                                    const data = JSON.parse(jsonStr);
+                                    if (data.type === 'complete') {
+                                        macros = data.macros;
+                                        imageBase64 = data.image;
+                                        if (macros && macros.carbs !== undefined && macros.proteins !== undefined && macros.fats !== undefined) {
+                                            createMacroChart(macros);
+                                        }
                                     }
-                                }, 200);
-                            });
-                        } else if (data.type === 'error') {
-                            throw new Error(data.error);
+                                }
+                            } catch (e) {
+                                console.warn('Error parsing final buffer:', e);
+                            }
                         }
-                    } catch (e) {
-                        console.error('Error parsing SSE data:', e);
+                    }
+                }
+                break;
+            }
+            
+            // Decode chunk and add to buffer
+            buffer += decoder.decode(value, { stream: true });
+            
+            // SSE messages are separated by \n\n
+            // Process complete messages (those ending with \n\n)
+            while (buffer.includes('\n\n')) {
+                const messageEnd = buffer.indexOf('\n\n');
+                const message = buffer.substring(0, messageEnd);
+                buffer = buffer.substring(messageEnd + 2); // Remove processed message
+                
+                if (message.trim() === '') continue; // Skip empty messages
+                
+                // Extract data line from SSE message
+                const lines = message.split('\n');
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const jsonStr = line.slice(6).trim();
+                            if (!jsonStr) continue; // Skip empty data lines
+                            
+                            const data = JSON.parse(jsonStr);
+                            
+                            if (data.type === 'chunk') {
+                                fullResponse += data.chunk;
+                                // Highlight numbers in the full response and update display
+                                const highlightedResponse = highlightNumbers(fullResponse);
+                                nutritionText.innerHTML = highlightedResponse;
+                                // Store for sharing
+                                currentNutritionText = highlightedResponse;
+                                // Auto-scroll to bottom
+                                nutritionText.scrollTop = nutritionText.scrollHeight;
+                                // Update progress
+                                progressFill.style.width = `${Math.min(90, (fullResponse.length / 1000) * 90)}%`;
+                            } else if (data.type === 'complete') {
+                                macros = data.macros;
+                                imageBase64 = data.image;
+                                progressFill.style.width = '100%';
+                                
+                                // Update image preview
+                                if (imageBase64) {
+                                    imagePreview.innerHTML = `<img src="${imageBase64}" alt="Analyzed Meal">`;
+                                }
+                                
+                                // Store macros for sharing
+                                currentMacros = macros;
+                                
+                                // Create chart after ensuring results section is visible
+                                // Use requestAnimationFrame to ensure DOM is ready
+                                requestAnimationFrame(() => {
+                                    setTimeout(() => {
+                                        if (macros && macros.carbs !== undefined && macros.proteins !== undefined && macros.fats !== undefined) {
+                                            console.log('Creating chart with macros:', macros);
+                                            createMacroChart(macros);
+                                        } else {
+                                            console.error('Invalid macros data:', macros);
+                                            // Create chart with defaults if macros are invalid
+                                            createMacroChart({ carbs: 40, proteins: 30, fats: 30 });
+                                            currentMacros = { carbs: 40, proteins: 30, fats: 30 };
+                                        }
+                                    }, 200);
+                                });
+                            } else if (data.type === 'error') {
+                                throw new Error(data.error);
+                            }
+                        } catch (e) {
+                            // Only log if it's not a JSON parse error for incomplete data
+                            if (e instanceof SyntaxError && e.message.includes('JSON')) {
+                                // This might be an incomplete JSON, skip for now
+                                console.warn('Incomplete JSON chunk, buffering...', e.message);
+                            } else {
+                                console.error('Error parsing SSE data:', e);
+                            }
+                        }
                     }
                 }
             }

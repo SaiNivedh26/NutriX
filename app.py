@@ -393,14 +393,27 @@ Analyze this food image and provide details about its calorie content and dietar
                     # Clean and format the chunk
                     cleaned_chunk = clean_response_text(chunk)
                     if cleaned_chunk:
-                        # Send chunk as JSON
-                        yield f"data: {json.dumps({'chunk': cleaned_chunk, 'type': 'chunk'})}\n\n"
+                        # Send chunk as JSON with proper escaping
+                        try:
+                            chunk_json = json.dumps({'chunk': cleaned_chunk, 'type': 'chunk'}, ensure_ascii=False)
+                            yield f"data: {chunk_json}\n\n"
+                        except (UnicodeEncodeError, ValueError) as e:
+                            # Fallback: escape the chunk manually if JSON encoding fails
+                            cleaned_chunk_escaped = cleaned_chunk.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                            yield f'data: {{"chunk": "{cleaned_chunk_escaped}", "type": "chunk"}}\n\n'
                 
                 # After streaming is complete, parse macros and send final data
                 macros = parse_macronutrients(full_response)
-                yield f"data: {json.dumps({'type': 'complete', 'macros': macros, 'image': image_base64})}\n\n"
+                try:
+                    complete_json = json.dumps({'type': 'complete', 'macros': macros, 'image': image_base64}, ensure_ascii=False)
+                    yield f"data: {complete_json}\n\n"
+                except (UnicodeEncodeError, ValueError) as e:
+                    # If image is too large, send without image
+                    complete_json = json.dumps({'type': 'complete', 'macros': macros}, ensure_ascii=False)
+                    yield f"data: {complete_json}\n\n"
             except Exception as e:
-                yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+                error_json = json.dumps({'type': 'error', 'error': str(e)}, ensure_ascii=False)
+                yield f"data: {error_json}\n\n"
         
         return Response(stream_with_context(generate()), mimetype='text/event-stream')
         
