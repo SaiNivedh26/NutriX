@@ -1,16 +1,34 @@
-import streamlit as st
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response, stream_with_context, send_file
 import google.generativeai as gemini
 from PIL import Image
 import base64
-import time
-import matplotlib.pyplot as plt
-import numpy as np
-import io
-import dotenv
-from dotenv import load_dotenv
+import re
 import os
+import json
+import uuid
+from datetime import datetime
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, PageBreak
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.pdfgen import canvas
+from io import BytesIO
+from dotenv import load_dotenv
+
 load_dotenv()
-# Configure Gemini API (Note: Replace with a secure method of API key management)
+
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['PDF_FOLDER'] = 'pdf_reports'
+
+# Create directories if they don't exist
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['PDF_FOLDER'], exist_ok=True)
+
+
+# Configure Gemini API
 gemini.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 
 # Custom loading phrases
@@ -22,18 +40,52 @@ LOADING_PHRASES = [
     "💡 Uncovering hidden nutritional secrets..."
 ]
 
-def get_gem_response(input_prompt, image):
-    model = gemini.GenerativeModel('gemini-2.5-flash')
-    response = model.generate_content([input_prompt, image[0]])
-    return response.text
+def get_gem_response_stream(input_prompt, image):
+    """Stream response from Gemini API"""
+    model = gemini.GenerativeModel('gemini-2.0-flash')
+    response = model.generate_content([input_prompt, image[0]], stream=True)
+    
+    for chunk in response:
+        if chunk.text:
+            yield chunk.text
+
+def clean_response_text(text):
+    """Remove markdown characters and format text properly"""
+    # Remove markdown headers (#, ##, ###) but preserve the text
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Remove markdown bold/italic (*, **, _) but keep the content
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+    text = re.sub(r'\*([^*\n]+)\*', r'\1', text)  # Don't match across newlines
+    text = re.sub(r'__([^_]+)__', r'\1', text)
+    text = re.sub(r'_([^_\n]+)_', r'\1', text)  # Don't match across newlines
+    # Remove standalone asterisks and hashes (but not in context)
+    text = re.sub(r'^\s*[*#]+\s*$', '', text, flags=re.MULTILINE)
+    # Remove markdown list markers at line start but keep content
+    text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)
+    # Remove numbered list markers but keep content
+    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+    # Remove markdown links but keep text
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+    # Remove horizontal rules (lines with only dashes/equals)
+    text = re.sub(r'^[-=]{3,}$', '', text, flags=re.MULTILINE)
+    # Clean up multiple spaces (but preserve single spaces)
+    text = re.sub(r' {2,}', ' ', text)
+    # Clean up multiple newlines (keep max 2)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+def highlight_numbers(text):
+    """Wrap numbers in span tags for highlighting"""
+    # Match numbers (integers and decimals) including percentages
+    pattern = r'(\d+\.?\d*%?)'
+    return re.sub(pattern, r'<span class="number-highlight">\1</span>', text)
 
 def input_image_setup(uploaded_file):
     if uploaded_file is not None:
-        # Read the file into bytes
-        bytes_data = uploaded_file.getvalue()
+        bytes_data = uploaded_file.read()
         image_parts = [
             {
-                "mime_type": uploaded_file.type,
+                "mime_type": uploaded_file.content_type,
                 "data": bytes_data
             }
         ]
@@ -41,279 +93,320 @@ def input_image_setup(uploaded_file):
     else:
         raise FileNotFoundError("No file uploaded")
 
-def generate_macronutrient_plot():
-    # Generate random macronutrient data for visualization
-    categories = ['Carbs', 'Proteins', 'Fats']
-    values = np.random.randint(10, 60, size=3)  # Random values between 10 and 60
-    values = (values / sum(values)) * 100  # Normalize to percentage
-
-    fig, ax = plt.subplots(figsize=(4, 3))
-    ax.bar(categories, values, color=['#FF9999', '#66B2FF', '#FFCC99'])
-    ax.set_title("Macronutrient Breakdown")
-    ax.set_ylabel("Percentage (%)")
+def parse_macronutrients(response_text):
+    """Extract macronutrient percentages from AI response"""
+    # Default values if parsing fails
+    carbs = None
+    proteins = None
+    fats = None
     
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
+    # Try to find percentages in the response
+    # Look for patterns like "carbohydrates: 45%", "carbs: 45%", "45% carbs", etc.
+    patterns = {
+        'carbs': [
+            r'carbohydrates?[:\s-]+(\d+(?:\.\d+)?)\s*%',
+            r'(\d+(?:\.\d+)?)\s*%[:\s-]+(?:of\s+)?carbohydrates?',
+            r'carbs?[:\s-]+(\d+(?:\.\d+)?)\s*%',
+            r'(\d+(?:\.\d+)?)\s*%[:\s-]+(?:of\s+)?carbs?',
+            r'carbohydrate[:\s-]+(\d+(?:\.\d+)?)\s*percent',
+            r'(\d+(?:\.\d+)?)\s*percent[:\s-]+carbohydrate',
+            # More flexible patterns
+            r'carbohydrates?\s*[:\-]\s*(\d+(?:\.\d+)?)\s*%',
+            r'(\d+(?:\.\d+)?)\s*%\s*carbohydrates?',
+            r'carbohydrates?\s*(\d+(?:\.\d+)?)\s*%'
+        ],
+        'proteins': [
+            r'proteins?[:\s-]+(\d+(?:\.\d+)?)\s*%',
+            r'(\d+(?:\.\d+)?)\s*%[:\s-]+(?:of\s+)?proteins?',
+            r'protein[:\s-]+(\d+(?:\.\d+)?)\s*%',
+            r'(\d+(?:\.\d+)?)\s*%[:\s-]+(?:of\s+)?protein',
+            r'protein[:\s-]+(\d+(?:\.\d+)?)\s*percent',
+            r'(\d+(?:\.\d+)?)\s*percent[:\s-]+protein',
+            # More flexible patterns
+            r'proteins?\s*[:\-]\s*(\d+(?:\.\d+)?)\s*%',
+            r'(\d+(?:\.\d+)?)\s*%\s*proteins?',
+            r'proteins?\s*(\d+(?:\.\d+)?)\s*%'
+        ],
+        'fats': [
+            r'fats?[:\s-]+(\d+(?:\.\d+)?)\s*%',
+            r'(\d+(?:\.\d+)?)\s*%[:\s-]+(?:of\s+)?fats?',
+            r'fat[:\s-]+(\d+(?:\.\d+)?)\s*%',
+            r'(\d+(?:\.\d+)?)\s*%[:\s-]+(?:of\s+)?fat',
+            r'fat[:\s-]+(\d+(?:\.\d+)?)\s*percent',
+            r'(\d+(?:\.\d+)?)\s*percent[:\s-]+fat',
+            # More flexible patterns
+            r'fats?\s*[:\-]\s*(\d+(?:\.\d+)?)\s*%',
+            r'(\d+(?:\.\d+)?)\s*%\s*fats?',
+            r'fats?\s*(\d+(?:\.\d+)?)\s*%'
+        ]
+    }
     
-    return buf
+    response_lower = response_text.lower()
+    
+    # Try to find all three macronutrients
+    for nutrient, pattern_list in patterns.items():
+        for pattern in pattern_list:
+            match = re.search(pattern, response_lower)
+            if match:
+                try:
+                    value = float(match.group(1))
+                    # Only accept reasonable values (0-100)
+                    if 0 <= value <= 100:
+                        if nutrient == 'carbs' and carbs is None:
+                            carbs = value
+                        elif nutrient == 'proteins' and proteins is None:
+                            proteins = value
+                        elif nutrient == 'fats' and fats is None:
+                            fats = value
+                        if carbs is not None and proteins is not None and fats is not None:
+                            break
+                except (ValueError, IndexError):
+                    continue
+        if carbs is not None and proteins is not None and fats is not None:
+            break
+    
+    # If we found all three, use them
+    if carbs is not None and proteins is not None and fats is not None:
+        # Normalize to ensure they sum to 100
+        total = carbs + proteins + fats
+        if total > 0:
+            carbs = (carbs / total) * 100
+            proteins = (proteins / total) * 100
+            fats = (fats / total) * 100
+    else:
+        # Use defaults if parsing failed
+        # Try to use partial data if available
+        if carbs is None:
+            carbs = 40
+        if proteins is None:
+            proteins = 30
+        if fats is None:
+            fats = 30
+        # Normalize defaults
+        total = carbs + proteins + fats
+        if total > 0:
+            carbs = (carbs / total) * 100
+            proteins = (proteins / total) * 100
+            fats = (fats / total) * 100
+    
+    result = {
+        'carbs': round(carbs, 1),
+        'proteins': round(proteins, 1),
+        'fats': round(fats, 1)
+    }
+    
+    # Debug logging (can be removed in production)
+    print(f"Parsed macros: {result}")
+    
+    return result
 
-# Advanced Streamlit UI
-def main():
-    # Custom page configuration
-    st.set_page_config(
-        page_title="NutriX-Food", 
-        page_icon="⭕", 
-        layout="wide"
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/image/<filename>')
+def serve_image(filename):
+    """Serve images from the root directory"""
+    return send_from_directory('.', filename)
+
+def generate_pdf_report(chart_image_path, nutrition_text, report_uuid):
+    """Generate PDF report with chart and nutrition text"""
+    pdf_path = os.path.join(app.config['PDF_FOLDER'], f'{report_uuid}.pdf')
+    
+    # Create PDF document
+    doc = SimpleDocTemplate(pdf_path, pagesize=A4,
+                          rightMargin=72, leftMargin=72,
+                          topMargin=72, bottomMargin=18)
+    
+    # Container for the 'Flowable' objects
+    elements = []
+    
+    # Define styles
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        textColor='#27AE60',
+        spaceAfter=30,
+        alignment=TA_CENTER
     )
-    st.markdown("<h1 style='font-size: 2em; color: red;'>Sai Nikedh - 10 B</h1>", unsafe_allow_html=True)
-
-    # Load and resize the QR code image
-    qr_code_image = Image.open('image.png')  # Path to uploaded image
-    qr_code_image = qr_code_image.resize((150, 150))  # Resize to a smaller size
-
-    # Display the QR code image directly below the name
-    st.image(qr_code_image, caption="Scan for More Info", use_container_width=False)
-
-    # Custom CSS for professional look
-    st.markdown("""
-    <style>
-    .main-header {
-        font-size: 3em;
-        color: #2C3E50;
-        text-align: center;
-        margin-bottom: 30px;
-    }
-    .subheader {
-        color: #34495E;
-        text-align: center;
-        margin-bottom: 20px;
-    }
-    .stButton>button {
-        background-color: #27AE60;
-        color: white;
-        font-size: 1.1em;
-        padding: 10px 20px;
-        border-radius: 10px;
-        transition: all 0.3s ease;
-    }
-    .stButton>button:hover {
-        background-color: #2ECC71;
-        transform: scale(1.05);
-    }
-    img.small-img {
-        max-width: 300px;
-        width: 100%;
-        border-radius: 10px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # App Title
-    st.markdown('<h1 class="main-header">🍎 NutriX - Food Advisor</h1>', unsafe_allow_html=True)
-    st.markdown('<h3 class="subheader">Unlock the Secrets of Your Meal</h3>', unsafe_allow_html=True)
-
-    # Image Upload
-    uploaded_file = st.file_uploader(
-        "Upload Your Meal Image", 
-        type=["jpg", "jpeg", "png"],
-        help="Supports JPG, JPEG, and PNG formats"
+    
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=18,
+        textColor='#2C3E50',
+        spaceAfter=12,
+        spaceBefore=12
     )
+    
+    normal_style = ParagraphStyle(
+        'CustomNormal',
+        parent=styles['Normal'],
+        fontSize=11,
+        textColor='#34495E',
+        spaceAfter=12,
+        alignment=TA_LEFT,
+        leading=16
+    )
+    
+    # Title
+    elements.append(Paragraph("🍎 NutriX - Nutrition Report", title_style))
+    elements.append(Spacer(1, 0.2*inch))
+    elements.append(Paragraph(f"Generated on: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", styles['Normal']))
+    elements.append(Spacer(1, 0.3*inch))
+    
+    # Chart Image
+    if os.path.exists(chart_image_path):
+        chart_img = RLImage(chart_image_path, width=5*inch, height=3*inch)
+        elements.append(Paragraph("Macronutrient Breakdown", heading_style))
+        elements.append(chart_img)
+        elements.append(Spacer(1, 0.3*inch))
+    
+    # Nutrition Text
+    elements.append(Paragraph("Nutrition Insights", heading_style))
+    
+    # Split text into paragraphs and add them
+    paragraphs = nutrition_text.split('\n\n')
+    for para in paragraphs:
+        if para.strip():
+            # Clean HTML tags if any
+            para_clean = re.sub(r'<[^>]+>', '', para)
+            elements.append(Paragraph(para_clean, normal_style))
+            elements.append(Spacer(1, 0.1*inch))
+    
+    # Footer
+    elements.append(Spacer(1, 0.3*inch))
+    elements.append(Paragraph("Designed and Developed by Sai Nikedh from 10-B", 
+                             ParagraphStyle('Footer', parent=styles['Normal'], 
+                                          fontSize=9, textColor='#7F8C8D', 
+                                          alignment=TA_CENTER)))
+    
+    # Build PDF
+    doc.build(elements)
+    return pdf_path
 
-    # Nutrition Analysis Prompt
-    input_prompt = """
+@app.route('/download', methods=['POST'])
+def download_report():
+    """Generate PDF and return it for download"""
+    try:
+        data = request.json
+        chart_image_base64 = data.get('chart_image')
+        nutrition_text = data.get('nutrition_text')
+        
+        if not chart_image_base64 or not nutrition_text:
+            return jsonify({'error': 'Missing required data'}), 400
+        
+        # Generate unique UUID
+        report_uuid = str(uuid.uuid4())
+        
+        # Save chart image temporarily
+        chart_image_path = os.path.join(app.config['PDF_FOLDER'], f'chart_{report_uuid}.png')
+        # Handle base64 data (remove data:image/png;base64, prefix if present)
+        chart_image_data_str = chart_image_base64
+        if ',' in chart_image_data_str:
+            chart_image_data_str = chart_image_data_str.split(',')[1]
+        chart_image_data = base64.b64decode(chart_image_data_str)
+        with open(chart_image_path, 'wb') as f:
+            f.write(chart_image_data)
+        
+        # Clean nutrition text (remove HTML tags)
+        clean_text = re.sub(r'<[^>]+>', '', nutrition_text)
+        clean_text = clean_text.replace('&nbsp;', ' ')
+        clean_text = clean_text.replace('&amp;', '&')
+        
+        # Generate PDF
+        pdf_path = generate_pdf_report(chart_image_path, clean_text, report_uuid)
+        
+        # Clean up temporary chart image after PDF is generated
+        try:
+            if os.path.exists(chart_image_path):
+                os.remove(chart_image_path)
+        except Exception as e:
+            print(f"Warning: Could not remove temporary chart image: {e}")
+        
+        # Return PDF file for download
+        return send_file(pdf_path, as_attachment=True, download_name=f'NutriX_Report_{report_uuid}.pdf')
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        # Check file type
+        if not file.filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+            return jsonify({'error': 'Invalid file type. Please upload JPG, JPEG, or PNG'}), 400
+        
+        # Read file
+        file.seek(0)
+        image_data = input_image_setup(file)
+
+        # Nutrition Analysis Prompt
+        input_prompt = """
 You are an expert nutritionist and providing dietary information. You need to see the food item from the image
-and calculate the total calories, also provide details of every food item with calorie intake in the below format:
+and calculate the total calories, also provide details of every food item with calorie intake.
 
-1. Item 1 - number of calories
-2. Item 2 - number of calories
----
----
+IMPORTANT: Write your response in plain text format. Do NOT use markdown formatting like asterisks (*), hash symbols (#), or any special markdown characters. Use simple text only.
+
     As a professional nutritionist, analyze this food image and provide:
-    1. Detailed calorie breakdown
-    2. Nutritional value of each item
-    3. Macro and micronutrient percentages
-    4. Health assessment
-    5. Dietary recommendations
-    
-Finally you can mention whether the food is healthy or not healthy and mention that too.
+- Detailed calorie breakdown for each item
+- Nutritional value of each item
+- Macro and micronutrient percentages
+
+CRITICAL: You MUST include the macronutrient breakdown in this EXACT format somewhere in your response:
+Carbohydrates: XX%, Proteins: YY%, Fats: ZZ%
+(where XX, YY, ZZ are the actual percentages that should sum to approximately 100%)
+
+For example: "Carbohydrates: 45%, Proteins: 30%, Fats: 25%" or "Carbs: 50%, Proteins: 25%, Fats: 25%"
+
+- Health assessment
+- Dietary recommendations
+
+Finally mention whether the food is healthy or not healthy.
 Mention the percentage split of ratio of carbohydrates, fats, fibers, sugars and other things required in diet.
 
 Analyze this food image and provide details about its calorie content and dietary recommendations.
 
-Response only if the image is some food item; for any other images, just respond with 'Provide a proper food image'. 
-"""
-
-    # Analysis Button
-    if uploaded_file is not None:
-        # Display uploaded image in a smaller size
-        image = Image.open(uploaded_file)
-        image_bytes = base64.b64encode(uploaded_file.read()).decode("utf-8")
+        """
         
-        st.markdown(
-            f"""
-            <div style="text-align: center; margin: 20px 0;">
-                <img class="small-img" src="data:image/png;base64,{image_bytes}" alt="Uploaded Meal">
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-        # Analysis Button
-        if st.button("Analyze Nutrition 🔬", key="analyze_btn"):
-            # Interactive Loading Experience
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            # Simulated loading with dynamic phrases
-            for i, phrase in enumerate(LOADING_PHRASES, 1):
-                status_text.info(phrase)
-                progress_bar.progress(i * 20)
-                time.sleep(0.7)
-
+        # Convert image to base64 for display
+        file.seek(0)
+        image_bytes = base64.b64encode(file.read()).decode("utf-8")
+        image_base64 = f"data:{file.content_type};base64,{image_bytes}"
+        
+        # Return streaming response
+        def generate():
+            full_response = ""
             try:
-                # Perform actual analysis
-                image_data = input_image_setup(uploaded_file)
-                with st.spinner('Generating professional nutrition report...'):
-                    response = get_gem_response(input_prompt, image_data)
-
-                # Clear loading states
-                progress_bar.empty()
-                status_text.empty()
-
-                # Display Results
-                st.success("✅ Nutrition Analysis Complete!")
+                for chunk in get_gem_response_stream(input_prompt, image_data):
+                    full_response += chunk
+                    # Clean and format the chunk
+                    cleaned_chunk = clean_response_text(chunk)
+                    if cleaned_chunk:
+                        # Send chunk as JSON
+                        yield f"data: {json.dumps({'chunk': cleaned_chunk, 'type': 'chunk'})}\n\n"
                 
-                col1, col2 = st.columns([2, 1])  # Create two columns
-
-                with col1:
-                    st.markdown("""
-                    <div style="
-                        font-family: Arial, sans-serif; 
-                        font-size: 1.5em;  
-                        line-height: 1.8;  
-                        color: #2C3E50; 
-                        background-color: #F9F9F9; 
-                        padding: 30px;  
-                        border-radius: 10px; 
-                        margin-top: 20px;
-                        max-width: 800px; 
-                        margin-left: auto; 
-                        margin-right: auto; 
-                    ">
-                        <h2 style="text-align: center; color: #27AE60; font-size: 2em;">📊 Nutrition Insights</h2>
-                        <div style="max-height: 600px;font-size: 1.8em; overflow-y: auto;">
-                            <p style="text-align: justify;">{}</p>  
-                        </div>
-                    </div>
-                    """.format(response), unsafe_allow_html=True)
-
-                with col2:
-                    st.subheader("Macronutrient Breakdown")
-                    plot_buf = generate_macronutrient_plot()
-                    st.image(plot_buf)
-
+                # After streaming is complete, parse macros and send final data
+                macros = parse_macronutrients(full_response)
+                yield f"data: {json.dumps({'type': 'complete', 'macros': macros, 'image': image_base64})}\n\n"
             except Exception as e:
-                st.error(f"Analysis failed: {e}")
-
-    else:
-        st.info("👆 Upload a meal image to get started!")
-
-# Run the app
-# Custom Footer
-def display_footer():
-    st.markdown("""
-    <hr style="margin-top: 40px; border: 1px solid #27AE60;">
-    <div style="
-        text-align: center; 
-        font-family: Arial, sans-serif; 
-        color: #2C3E50; 
-        font-size: 1.2em; 
-        margin-top: 20px;
-    ">
-        <p style="
-            font-size: 1.5em; 
-            color: #27AE60; 
-            font-weight: bold;
-        ">
-            Designed and Developed by Sai Nikedh from 10-B
-        </p>
-        <p style="
-            font-size: 1.1em; 
-            color: #34495E; 
-            margin-top: -10px;
-        ">
-            Empowering Nutrition with Cutting-Edge AI Solutions
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-# Run the app
-if __name__ == "__main__":
-    main()
-    display_footer()
+                yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        
+        return Response(stream_with_context(generate()), mimetype='text/event-stream')
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
-# import streamlit as st
-# import google.generativeai as gemini
-# import os
-# from PIL import Image
-
-# gemini.configure(api_key="AIzaSyDAA7gq4wlgmKaivg_NsD3uF3CkIn8B8mc")
-
-# def get_gem_response(input_prompt,image):
-#     model=gemini.GenerativeModel('gemini-1.5-flash')
-#     response=model.generate_content([input_prompt,image[0]])
-#     return response.text
-
-# def input_image_setup(uploaded_file):
-#     if uploaded_file is not None:
-#         # Read the file into bytes
-#         bytes_data = uploaded_file.getvalue()
-
-#         image_parts = [
-#             {
-#                 "mime_type": uploaded_file.type,  # Get the mime type of the uploaded file
-#                 "data": bytes_data
-#             }
-#         ]
-#         return image_parts
-#     else:
-#         raise FileNotFoundError("OOPS ! ..... File not found")
-    
-
-# st.set_page_config(page_title="Calories Advsior",page_icon="./my_img.jpeg")
-# st.header("Nutrition checker app by Sai Nikedh")
-# uploaded_file = st.file_uploader("Choose an image..: ",type=["jpj","jpeg","png"])
-# image=""
-# if uploaded_file is not None:
-#     image=Image.open(uploaded_file)
-#     st.image(image,caption="Uploaded image",use_container_width=True)
-
-# submit=st.button("Tell me about Total calories in this food item")
-
-# input_prompt = """
-# You are an expert in nutritionist and providing Dietary information, you need to see the foodn item from the image
-# and calculate the total calories, also provided details of every food items with calory intake
-# in the below format
-
-# 1. Item 1 - number of calories
-# 2. Item 2 - number of calories
-# ---
-# ---
-
-# Finally you can mention whether the food is healthy or not healthy and mention that too.
-# mention the percentage split of ratio of carbohydrate,fats,fibres,sugars and other things required in diet
-
-# Analyze this food image and provide details about its calorie content and dietary recommendations.
-
-# Response only if the Image is some food item, for any other Images, just respond Provide proper food Image. 
-
-# """
-
-# if submit:
-#      with st.spinner('Calculating calories...'):
-#         image_data = input_image_setup(uploaded_file)
-#         response = get_gem_response(input_prompt,image_data)
-#      st.header("Response is ")
-#      st.write(response)
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)

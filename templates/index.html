@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NutriX - Food Advisor</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Theme Toggle -->
+        <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme">
+            <span class="theme-icon">🌙</span>
+        </button>
+
+        <!-- Header -->
+        <header class="glass-card header-section">
+            <div class="header-content">
+                <h1 class="main-title">🍎 NutriX</h1>
+                <h2 class="subtitle">Food Advisor</h2>
+                <p class="tagline">Unlock the Secrets of Your Meal</p>
+            </div>
+            <div class="author-info">
+                <h3 class="author-name">Sai Nikedh - 10 B</h3>
+                <div class="qr-container">
+                    <img src="{{ url_for('serve_image', filename='image.png') }}" alt="QR Code" class="qr-image" onerror="this.style.display='none'">
+                    <p class="qr-caption">Scan for More Info</p>
+                </div>
+            </div>
+        </header>
+
+        <!-- Upload Section -->
+        <div class="glass-card upload-section">
+            <div class="upload-area" id="uploadArea">
+                <input type="file" id="fileInput" accept="image/jpeg,image/jpg,image/png" hidden>
+                <div class="upload-content">
+                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="17 8 12 3 7 8"></polyline>
+                        <line x1="12" y1="3" x2="12" y2="15"></line>
+                    </svg>
+                    <h3>Upload Your Meal Image</h3>
+                    <p>Click or drag and drop your image here</p>
+                    <p class="file-types">Supports JPG, JPEG, and PNG formats</p>
+                </div>
+            </div>
+            <div id="imagePreview" class="image-preview hidden"></div>
+            <button id="analyzeBtn" class="analyze-btn hidden" disabled>
+                <span class="btn-text">Analyze Nutrition 🔬</span>
+                <span class="btn-loader hidden"></span>
+            </button>
+        </div>
+
+        <!-- Loading Section -->
+        <div id="loadingSection" class="glass-card loading-section hidden">
+            <div class="loader-container">
+                <div class="awesome-loader">
+                    <div class="loader-icon">🍎</div>
+                </div>
+                <p id="loadingText" class="loading-text">🔍 Analyzing your delicious meal...</p>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="resultsSection" class="results-section hidden">
+            <div class="glass-card results-card">
+                <div class="results-header">
+                    <h2 class="results-title">📊 Nutrition Insights</h2>
+                    <button id="downloadBtn" class="share-btn" title="Download Report">
+                        <span>📥 Download PDF</span>
+                    </button>
+                </div>
+                <div id="nutritionText" class="nutrition-text"></div>
+            </div>
+            
+            <div class="glass-card chart-card">
+                <h2 class="chart-title">Macronutrient Breakdown</h2>
+                <canvas id="macroChart" width="400" height="300"></canvas>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="glass-card footer-section">
+            <p class="footer-title">Designed and Developed with ❤️ by Sai Nikedh from 10-B</p>
+            <p class="footer-subtitle">Empowering Nutrition with Real-time AI Solutions</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
+
