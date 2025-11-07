@@ -125,6 +125,12 @@ analyzeBtn.addEventListener('click', async () => {
         loadingSection.classList.add('hidden');
         resultsSection.classList.remove('hidden');
         
+        // Ensure chart container is visible
+        const chartCard = document.querySelector('.chart-card');
+        if (chartCard) {
+            chartCard.style.display = 'block';
+        }
+        
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         
@@ -164,18 +170,21 @@ analyzeBtn.addEventListener('click', async () => {
                             // Store macros for sharing
                             currentMacros = macros;
                             
-                            // Create chart after a small delay to ensure canvas is visible
-                            setTimeout(() => {
-                                if (macros && macros.carbs !== undefined && macros.proteins !== undefined && macros.fats !== undefined) {
-                                    console.log('Creating chart with macros:', macros);
-                                    createMacroChart(macros);
-                                } else {
-                                    console.error('Invalid macros data:', macros);
-                                    // Create chart with defaults if macros are invalid
-                                    createMacroChart({ carbs: 40, proteins: 30, fats: 30 });
-                                    currentMacros = { carbs: 40, proteins: 30, fats: 30 };
-                                }
-                            }, 100);
+                            // Create chart after ensuring results section is visible
+                            // Use requestAnimationFrame to ensure DOM is ready
+                            requestAnimationFrame(() => {
+                                setTimeout(() => {
+                                    if (macros && macros.carbs !== undefined && macros.proteins !== undefined && macros.fats !== undefined) {
+                                        console.log('Creating chart with macros:', macros);
+                                        createMacroChart(macros);
+                                    } else {
+                                        console.error('Invalid macros data:', macros);
+                                        // Create chart with defaults if macros are invalid
+                                        createMacroChart({ carbs: 40, proteins: 30, fats: 30 });
+                                        currentMacros = { carbs: 40, proteins: 30, fats: 30 };
+                                    }
+                                }, 200);
+                            });
                         } else if (data.type === 'error') {
                             throw new Error(data.error);
                         }
@@ -217,21 +226,45 @@ function highlightNumbers(text) {
 }
 
 function createMacroChart(macros) {
+    console.log('createMacroChart called with:', macros);
+    
+    // Check if Chart.js is loaded
+    if (typeof Chart === 'undefined') {
+        console.error('Chart.js is not loaded!');
+        return;
+    }
+    
     const chartCanvas = document.getElementById('macroChart');
     if (!chartCanvas) {
         console.error('Chart canvas not found');
         return;
     }
     
-    // Ensure canvas has proper dimensions based on container
+    // Ensure results section is visible
+    const resultsSection = document.getElementById('resultsSection');
+    if (resultsSection && resultsSection.classList.contains('hidden')) {
+        resultsSection.classList.remove('hidden');
+    }
+    
+    // Ensure canvas is visible
+    chartCanvas.style.display = 'block';
+    
+    // Get container dimensions
     const container = chartCanvas.parentElement;
+    let containerWidth = 400;
     if (container) {
-        const containerWidth = container.offsetWidth || 400;
-        chartCanvas.width = containerWidth;
-        chartCanvas.height = 300;
+        containerWidth = container.offsetWidth || container.clientWidth || 400;
+    }
+    
+    // Get container for proper sizing
+    const chartContainer = chartCanvas.parentElement;
+    if (chartContainer && chartContainer.classList.contains('chart-container')) {
+        // Container will handle sizing via CSS
+        chartCanvas.style.width = '100%';
+        chartCanvas.style.height = '100%';
     } else {
-        chartCanvas.width = 400;
-        chartCanvas.height = 300;
+        chartCanvas.style.width = '100%';
+        chartCanvas.style.height = '300px';
     }
     
     const ctx = chartCanvas.getContext('2d');
@@ -255,7 +288,11 @@ function createMacroChart(macros) {
     
     // Destroy existing chart if it exists
     if (macroChart) {
-        macroChart.destroy();
+        try {
+            macroChart.destroy();
+        } catch (e) {
+            console.warn('Error destroying existing chart:', e);
+        }
         macroChart = null;
     }
     
@@ -287,7 +324,8 @@ function createMacroChart(macros) {
         },
         options: {
             responsive: true,
-            maintainAspectRatio: true,
+            maintainAspectRatio: false,
+            aspectRatio: 1.5,
             plugins: {
                 legend: {
                     display: false
@@ -331,12 +369,36 @@ function createMacroChart(macros) {
             }
         }
     });
+        console.log('Chart created successfully');
     } catch (error) {
         console.error('Error creating chart:', error);
-        // Try to create a simple fallback chart
-        if (macroChart) {
-            macroChart.destroy();
-            macroChart = null;
+        console.error('Error details:', error.message, error.stack);
+        
+        // Try to create a simple fallback chart with defaults
+        try {
+            if (macroChart) {
+                macroChart.destroy();
+                macroChart = null;
+            }
+            // Retry with simpler configuration
+            macroChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: ['Carbohydrates', 'Proteins', 'Fats'],
+                    datasets: [{
+                        label: 'Percentage (%)',
+                        data: [carbs, proteins, fats],
+                        backgroundColor: ['#ff9999', '#66b2ff', '#ffcc99']
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false
+                }
+            });
+            console.log('Fallback chart created');
+        } catch (fallbackError) {
+            console.error('Failed to create fallback chart:', fallbackError);
         }
     }
 }
